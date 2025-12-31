@@ -42,6 +42,7 @@ The loop length is calculated from transport: `beats_per_bar (from transport) ×
 - gcc or compatible C compiler
 - LV2 development headers
 - make
+- pkg-config
 
 ### Build Instructions
 
@@ -65,10 +66,26 @@ make clean
 ## Installation
 
 After building, the plugin will be installed to your LV2 plugin directory:
-- System-wide: `/usr/local/lib/lv2/remus.lv2/`
+- System-wide: `${PREFIX}/lib/lv2/remus.lv2/` (usually `/usr/local/lib/lv2/`)
 - User install: `~/.lv2/remus.lv2/`
 
 Your LV2 host should automatically detect the plugin after installation.
+
+## Project Structure
+
+```
+remus/
+├── src/              # C source code
+│   └── remus.c
+├── plugins/          # Plugin bundles
+│   └── remus.lv2/
+│       ├── manifest.ttl
+│       └── remus.ttl
+├── build/            # Build artifacts (generated)
+├── Makefile          # Build system
+├── README.md
+└── LICENSE
+```
 
 ## Usage Examples
 

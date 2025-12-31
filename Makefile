@@ -4,7 +4,7 @@
 # Plugin name and URI
 PLUGIN_NAME = remus
 PLUGIN_SO = $(PLUGIN_NAME).so
-PLUGIN_URI_PATH = remus.lv2
+PLUGIN_BUNDLE = plugins/remus.lv2
 
 # Installation paths
 PREFIX ?= /usr/local
@@ -18,39 +18,46 @@ LDFLAGS ?= -shared -lm
 # LV2 flags
 LV2_CFLAGS = $(shell pkg-config --cflags lv2 2>/dev/null || echo "")
 
+# Source and build directories
+SRC_DIR = src
+BUILD_DIR = build
+
 # Source files
-SRC = $(PLUGIN_NAME).c
-OBJ = $(SRC:.c=.o)
+SRC = $(SRC_DIR)/$(PLUGIN_NAME).c
+OBJ = $(BUILD_DIR)/$(PLUGIN_NAME).o
 
 # Build targets
-all: $(PLUGIN_SO)
+all: $(PLUGIN_BUNDLE)/$(PLUGIN_SO)
 
-$(PLUGIN_SO): $(OBJ)
-	$(CC) $(OBJ) $(LDFLAGS) -o $@
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
 
-%.o: %.c
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(LV2_CFLAGS) -c $< -o $@
 
+$(PLUGIN_BUNDLE)/$(PLUGIN_SO): $(OBJ)
+	$(CC) $(OBJ) $(LDFLAGS) -o $@
+
 clean:
-	rm -f $(OBJ) $(PLUGIN_SO)
-	rm -rf $(PLUGIN_URI_PATH)
+	rm -rf $(BUILD_DIR)
+	rm -f $(PLUGIN_BUNDLE)/$(PLUGIN_SO)
 
 install: all
-	install -d $(DESTDIR)$(LV2_DIR)/$(PLUGIN_URI_PATH)
-	install -m 644 $(PLUGIN_SO) $(DESTDIR)$(LV2_DIR)/$(PLUGIN_URI_PATH)/
-	install -m 644 manifest.ttl $(DESTDIR)$(LV2_DIR)/$(PLUGIN_URI_PATH)/
-	install -m 644 $(PLUGIN_NAME).ttl $(DESTDIR)$(LV2_DIR)/$(PLUGIN_URI_PATH)/
+	install -d $(DESTDIR)$(LV2_DIR)/remus.lv2
+	install -m 755 $(PLUGIN_BUNDLE)/$(PLUGIN_SO) $(DESTDIR)$(LV2_DIR)/remus.lv2/
+	install -m 644 $(PLUGIN_BUNDLE)/manifest.ttl $(DESTDIR)$(LV2_DIR)/remus.lv2/
+	install -m 644 $(PLUGIN_BUNDLE)/$(PLUGIN_NAME).ttl $(DESTDIR)$(LV2_DIR)/remus.lv2/
 
 install-user: all
-	install -d ~/.lv2/$(PLUGIN_URI_PATH)
-	install -m 644 $(PLUGIN_SO) ~/.lv2/$(PLUGIN_URI_PATH)/
-	install -m 644 manifest.ttl ~/.lv2/$(PLUGIN_URI_PATH)/
-	install -m 644 $(PLUGIN_NAME).ttl ~/.lv2/$(PLUGIN_URI_PATH)/
+	install -d ~/.lv2/remus.lv2
+	install -m 755 $(PLUGIN_BUNDLE)/$(PLUGIN_SO) ~/.lv2/remus.lv2/
+	install -m 644 $(PLUGIN_BUNDLE)/manifest.ttl ~/.lv2/remus.lv2/
+	install -m 644 $(PLUGIN_BUNDLE)/$(PLUGIN_NAME).ttl ~/.lv2/remus.lv2/
 
 uninstall:
-	rm -rf $(DESTDIR)$(LV2_DIR)/$(PLUGIN_URI_PATH)
+	rm -rf $(DESTDIR)$(LV2_DIR)/remus.lv2
 
 uninstall-user:
-	rm -rf ~/.lv2/$(PLUGIN_URI_PATH)
+	rm -rf ~/.lv2/remus.lv2
 
 .PHONY: all clean install install-user uninstall uninstall-user
