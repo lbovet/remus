@@ -14,6 +14,9 @@
 #define REMUS_URI "http://github.com/lbovet/remus"
 
 #define MAX_BUFFER_SIZE 48000 * 60 * 5  // 5 minutes at 48kHz
+#define TAIL_BUFFER_SIZE 1024  // Maximum tail buffer size for zero-crossing alignment
+#define ZERO_CROSSING_DISTANCE 8  // Maximum distance for zero-crossing matching
+#define CROSSFADE_SAMPLES 64  // Number of samples for crossfade transition
 
 typedef enum {
 	REMUS_AUDIO_IN      = 0,
@@ -73,6 +76,13 @@ typedef struct {
 	bool     playing;
 	bool     waiting_to_play;
 	float    prev_record_enable;
+	
+	// Tail buffer for zero-crossing alignment (max TAIL_BUFFER_SIZE samples)
+	float    tail_buffer[TAIL_BUFFER_SIZE];
+	uint32_t tail_pos;
+	bool     recording_tail;
+	uint32_t tail_zero_crossings;
+	int32_t  tail_min_distance;
 	
 	double   sample_rate;
 	float    last_bar_beat;
@@ -145,6 +155,10 @@ instantiate(const LV2_Descriptor*     descriptor,
 	remus->waiting_to_play = false;
 	remus->prev_record_enable = 0.0f;
 	remus->loop_samples = 0;
+	remus->tail_pos = 0;
+	remus->recording_tail = false;
+	remus->tail_zero_crossings = 0;
+	remus->tail_min_distance = TAIL_BUFFER_SIZE;
 	remus->last_bar_beat = -1.0f;
 	remus->last_bar = -1;
 	remus->transport_bpm = 120.0f;
@@ -213,6 +227,10 @@ activate(LV2_Handle instance)
 	remus->waiting_to_play = false;
 	remus->prev_record_enable = 0.0f;
 	remus->loop_samples = 0;
+	remus->tail_pos = 0;
+	remus->recording_tail = false;
+	remus->tail_zero_crossings = 0;
+	remus->tail_min_distance = TAIL_BUFFER_SIZE;
 	remus->last_bar_beat = -1.0f;
 	remus->last_bar = -1;
 	remus->transport_bpm = 120.0f;
@@ -328,6 +346,12 @@ run(LV2_Handle instance, uint32_t n_samples)
 				remus->loop_samples = remus->write_pos;
 			}
 		}
+		if (remus->recording_tail) {
+			remus->recording_tail = false;
+			remus->has_recorded = true;
+			remus->tail_pos = 0;
+			fprintf(stderr, "REMUS: Tail recording stopped manually\n");
+		}
 	}
 	
 	// Handle playback alignment with transport
@@ -385,15 +409,139 @@ run(LV2_Handle instance, uint32_t n_samples)
 				remus->buffer[remus->write_pos] = audio_in[i];
 				remus->write_pos++;
 				
-				// If we've filled the loop, stop recording
+				// If we've filled the loop, start tail recording
 				if (remus->write_pos >= remus->loop_samples) {
 					remus->recording = false;
-					remus->has_recorded = true;
-					remus->write_pos = remus->loop_samples;
+					remus->recording_tail = true;
+					remus->tail_pos = 0;
+					remus->tail_zero_crossings = 0;
+				remus->tail_min_distance = TAIL_BUFFER_SIZE;
+					fprintf(stderr, "REMUS: Loop filled (%u samples), starting tail recording\n", remus->loop_samples);
 				}
 			}
 			
 			// Silence output while recording
+			audio_out[i] = 0.0f;
+		} else if (remus->recording_tail) {
+			// Record into tail buffer and search for zero-crossings
+			uint32_t stitch_position = 0;
+			
+			if (remus->tail_pos < TAIL_BUFFER_SIZE) {
+				remus->tail_buffer[remus->tail_pos] = audio_in[i];
+				remus->tail_pos++;
+				
+				// Start searching after we have at least 2 samples (need at least one crossing)
+				if (remus->tail_pos >= 2) {
+					// Check if we just crossed zero in the tail buffer
+					bool tail_crossing = false;
+					bool tail_positive = false;
+					uint32_t t = remus->tail_pos - 1;
+					
+					if ((remus->tail_buffer[t-1] < 0.0f && remus->tail_buffer[t] >= 0.0f)) {
+						tail_crossing = true;
+						tail_positive = true;
+					} else if ((remus->tail_buffer[t-1] > 0.0f && remus->tail_buffer[t] <= 0.0f)) {
+						tail_crossing = true;
+						tail_positive = false;
+					}
+					
+					if (tail_crossing) {
+						// Count this zero-crossing
+						remus->tail_zero_crossings++;
+						
+					// Search for matching zero-crossing in loop start
+					// Search relative to tail_pos, within ±ZERO_CROSSING_DISTANCE samples
+					uint32_t loop_search_start = (t > ZERO_CROSSING_DISTANCE) ? (t - ZERO_CROSSING_DISTANCE) : 1;
+					uint32_t loop_search_end = (t + ZERO_CROSSING_DISTANCE < remus->loop_samples) ? (t + ZERO_CROSSING_DISTANCE) : remus->loop_samples - 1;
+						for (uint32_t l = loop_search_start; l <= loop_search_end; l++) {
+							bool loop_crossing = false;
+							bool loop_positive = false;
+							
+							// Check for zero crossing in loop
+							if ((remus->buffer[l-1] < 0.0f && remus->buffer[l] >= 0.0f)) {
+								loop_crossing = true;
+								loop_positive = true;
+							} else if ((remus->buffer[l-1] > 0.0f && remus->buffer[l] <= 0.0f)) {
+								loop_crossing = true;
+								loop_positive = false;
+							}
+							
+							// Check if crossings match in direction
+							if (loop_crossing && (tail_positive == loop_positive)) {
+								int32_t distance = abs((int32_t)t - (int32_t)l);
+								
+								// Track minimum distance
+								if (distance < remus->tail_min_distance) {
+									remus->tail_min_distance = distance;
+								}
+
+								// Calculate midpoint
+								uint32_t midpoint = (t + l) / 2;
+
+								// Match found within threshold and crossfade is possible for the tail buffer
+								if (distance <= ZERO_CROSSING_DISTANCE && midpoint + 1 < (TAIL_BUFFER_SIZE - CROSSFADE_SAMPLES / 2)) {
+									// Set the stitch position to the midpoint between the two zero-crossings
+									stitch_position = midpoint + 1;
+									
+									fprintf(stderr, "REMUS: Found zero-crossing match - tail[%u] and loop[%u], distance=%d samples, slope=%s, midpoint=%u\n",
+											t, l, distance,
+											tail_positive ? "positive" : "negative", midpoint);
+									
+									// Stop tail recording
+									remus->recording_tail = false;
+									remus->has_recorded = true;
+									remus->tail_pos = 0;
+									break;
+								}
+							}
+						}
+					}
+				}
+				
+				// Check if tail buffer is full without finding a match
+				if (remus->tail_pos >= TAIL_BUFFER_SIZE) {
+					// Choose closest position able to crossfade
+					stitch_position = CROSSFADE_SAMPLES / 2;
+					fprintf(stderr, "REMUS: Tail buffer full - copying %u samples (no zero-crossing match)\n", stitch_position);
+					
+					remus->recording_tail = false;
+					remus->has_recorded = true;
+					remus->tail_pos = 0;
+					if (remus->tail_min_distance < TAIL_BUFFER_SIZE) {
+						fprintf(stderr, "REMUS: Finishing without zero-crossing alignment. "
+						        "Considered %u zero-crossings, minimal distance found: %d samples\n",
+						        remus->tail_zero_crossings, remus->tail_min_distance);
+					} else {
+						fprintf(stderr, "REMUS: Finishing without zero-crossing alignment. "
+						        "Considered %u zero-crossings, no matching crossings found in loop\n",
+						        remus->tail_zero_crossings);
+					}
+				}
+			}
+			
+			// Perform crossfade if needed
+			if (stitch_position > 0) {
+				// Apply crossfade centered around stitch_position position
+				const uint32_t half_crossfade = CROSSFADE_SAMPLES / 2;
+				
+				for (uint32_t cf = 0; cf < CROSSFADE_SAMPLES; cf++) {
+					// Position in loop buffer
+					uint32_t loop_pos = (int32_t)stitch_position - (int32_t)half_crossfade + (int32_t)cf;
+					
+					// Position in tail buffer
+					int32_t tail_offset = (int32_t)stitch_position - (int32_t)half_crossfade + (int32_t)cf;
+				
+					// Linear crossfade: fade out loop, fade in tail
+					float fade_in = (float)cf / (float)(CROSSFADE_SAMPLES - 1);
+					float fade_out = 1.0f - fade_in;
+					
+					remus->buffer[loop_pos] = remus->buffer[loop_pos] * fade_out + remus->tail_buffer[tail_offset] * fade_in;
+				}
+				
+				fprintf(stderr, "REMUS: Applied %u-sample crossfade around position %u for click-free transition\n", CROSSFADE_SAMPLES, stitch_position);
+			}
+			
+			// Silence output while recording tail
 			audio_out[i] = 0.0f;
 		} else if (remus->playing && remus->has_recorded && remus->loop_samples > 0) {
 			// Playback loop (only when playing)
@@ -411,7 +559,7 @@ run(LV2_Handle instance, uint32_t n_samples)
 	
 	// Update recording status outputs
 	if (remus->recording_status) {
-		*remus->recording_status = remus->recording ? 1.0f : 0.0f;
+		*remus->recording_status = (remus->recording || remus->recording_tail) ? 1.0f : 0.0f;
 	}
 	if (remus->armed_status) {
 		*remus->armed_status = remus->waiting_for_bar ? 1.0f : 0.0f;
