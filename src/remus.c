@@ -25,8 +25,8 @@ typedef enum {
 	REMUS_RECORD_EN     = 3,
 	REMUS_LOOP_LEN      = 4,
 	REMUS_PERSIST_EN    = 5,
-	REMUS_RECORDING_OUT = 6,
-	REMUS_ARMED_OUT     = 7,
+	REMUS_ARMED_OUT     = 6,
+	REMUS_RECORDING_OUT = 7,
 	REMUS_RECORDED_OUT  = 8
 } PortIndex;
 
