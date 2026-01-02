@@ -19,7 +19,7 @@ A simple LV2 plugin for recording and looping audio samples that strictly align 
 | Audio In | Audio Input | - | - | Mono audio input |
 | Audio Out | Audio Output | - | - | Mono audio output (recorded loop or silence) |
 | Control | Atom Input | - | - | Transport position information |
-| Record Enable | Control | 0-1 (toggle) | 0 | Start/stop recording (waits for bar boundary) |
+| Record Enable | Control | 0-1 (toggle) | 0 | Arm recording on transition to zero (waits for bar boundary) |
 | Loop Length | Control | 1-64 bars | 4 | Loop length in bars |
 | Persist Loop | Control | 0-1 (toggle) | 1 | Save loop with project |
 

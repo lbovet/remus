@@ -301,11 +301,24 @@ run(LV2_Handle instance, uint32_t n_samples)
 	const uint32_t loop_beats = (uint32_t)(remus->transport_beats_per_bar * loop_len);
 	const uint32_t new_loop_samples = (uint32_t)((loop_beats * 60.0 * remus->sample_rate) / remus->transport_bpm);
 	
-	// Detect record enable edge (off to on transition)
-	const bool rec_start = (rec_enable > 0.5f) && (remus->prev_record_enable <= 0.5f);
-	const bool rec_stop = (rec_enable <= 0.5f) && (remus->prev_record_enable > 0.5f);
+	// Detect record enable edge (on to off transition)
+	const bool rec_start = (rec_enable <= 0.5f) && (remus->prev_record_enable > 0.5f);
+
 	remus->prev_record_enable = rec_enable;
 	
+	// Stop recording on manual restart
+	if (remus->recording && rec_start) {
+		if (remus->recording) {
+			remus->recording = false;
+		}
+		if (remus->recording_tail) {
+			remus->recording_tail = false;
+			remus->has_recorded = true;
+			remus->tail_pos = 0;
+			fprintf(stderr, "REMUS: Tail recording stopped manually\n");
+		}
+	}
+
 	// On record start, wait for next bar boundary
 	if (rec_start) {
 		remus->waiting_for_bar = true;
@@ -316,7 +329,7 @@ run(LV2_Handle instance, uint32_t n_samples)
 			remus->loop_samples = remus->buffer_size;
 		}
 	}
-	
+
 	// Check if we've crossed a bar boundary
 	if (remus->waiting_for_bar && transport_rolling) {
 		// Detect bar change
@@ -336,24 +349,6 @@ run(LV2_Handle instance, uint32_t n_samples)
 			remus->write_pos = 0;
 			remus->read_pos = 0;
 			remus->has_recorded = false;
-		}
-	}
-	
-	// Stop recording when disabled
-	if (rec_stop) {
-		remus->waiting_for_bar = false;
-		if (remus->recording) {
-			remus->recording = false;
-			if (remus->write_pos > 0) {
-				remus->has_recorded = true;
-				remus->loop_samples = remus->write_pos;
-			}
-		}
-		if (remus->recording_tail) {
-			remus->recording_tail = false;
-			remus->has_recorded = true;
-			remus->tail_pos = 0;
-			fprintf(stderr, "REMUS: Tail recording stopped manually\n");
 		}
 	}
 	
