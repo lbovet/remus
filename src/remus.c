@@ -83,6 +83,7 @@ typedef struct {
 	bool     recording_tail;
 	uint32_t tail_zero_crossings;
 	int32_t  tail_min_distance;
+	uint32_t stitch_position;  // Position for crossfade, 0 means not set
 	
 	double   sample_rate;
 	float    last_bar_beat;
@@ -159,6 +160,7 @@ instantiate(const LV2_Descriptor*     descriptor,
 	remus->recording_tail = false;
 	remus->tail_zero_crossings = 0;
 	remus->tail_min_distance = TAIL_BUFFER_SIZE;
+remus->stitch_position = 0;
 	remus->last_bar_beat = -1.0f;
 	remus->last_bar = -1;
 	remus->transport_bpm = 120.0f;
@@ -231,6 +233,7 @@ activate(LV2_Handle instance)
 	remus->recording_tail = false;
 	remus->tail_zero_crossings = 0;
 	remus->tail_min_distance = TAIL_BUFFER_SIZE;
+remus->stitch_position = 0;
 	remus->last_bar_beat = -1.0f;
 	remus->last_bar = -1;
 	remus->transport_bpm = 120.0f;
@@ -416,6 +419,7 @@ run(LV2_Handle instance, uint32_t n_samples)
 					remus->tail_pos = 0;
 					remus->tail_zero_crossings = 0;
 				remus->tail_min_distance = TAIL_BUFFER_SIZE;
+remus->stitch_position = 0;
 					fprintf(stderr, "REMUS: Loop filled (%u samples), starting tail recording\n", remus->loop_samples);
 				}
 			}
@@ -424,7 +428,6 @@ run(LV2_Handle instance, uint32_t n_samples)
 			audio_out[i] = 0.0f;
 		} else if (remus->recording_tail) {
 			// Record into tail buffer and search for zero-crossings
-			uint32_t stitch_position = 0;
 			
 			if (remus->tail_pos < TAIL_BUFFER_SIZE) {
 				remus->tail_buffer[remus->tail_pos] = audio_in[i];
@@ -478,19 +481,19 @@ run(LV2_Handle instance, uint32_t n_samples)
 								// Calculate midpoint
 								uint32_t midpoint = (t + l) / 2;
 
-								// Match found within threshold and crossfade is possible for the tail buffer
-								if (distance <= ZERO_CROSSING_DISTANCE && midpoint + 1 < (TAIL_BUFFER_SIZE - CROSSFADE_SAMPLES / 2)) {
+								// Match found within threshold and crossfade is possible
+								if (distance <= ZERO_CROSSING_DISTANCE 
+									&& midpoint >= (CROSSFADE_SAMPLES / 2)
+									&& midpoint + 1 < (TAIL_BUFFER_SIZE - CROSSFADE_SAMPLES / 2)
+									&& remus->stitch_position == 0) {  // Only set once
 									// Set the stitch position to the midpoint between the two zero-crossings
-									stitch_position = midpoint + 1;
+									remus->stitch_position = midpoint + 1;
 									
 									fprintf(stderr, "REMUS: Found zero-crossing match - tail[%u] and loop[%u], distance=%d samples, slope=%s, midpoint=%u\n",
 											t, l, distance,
 											tail_positive ? "positive" : "negative", midpoint);
-									
-									// Stop tail recording
-									remus->recording_tail = false;
-									remus->has_recorded = true;
-									remus->tail_pos = 0;
+									fprintf(stderr, "REMUS: Continuing tail recording to collect crossfade samples (need %u more samples)\n",
+											remus->stitch_position + CROSSFADE_SAMPLES / 2 - remus->tail_pos);
 									break;
 								}
 							}
@@ -498,15 +501,24 @@ run(LV2_Handle instance, uint32_t n_samples)
 					}
 				}
 				
+				// Check if we have enough samples for crossfade after finding a match
+				if (remus->stitch_position > 0) {
+					uint32_t samples_needed = remus->stitch_position + CROSSFADE_SAMPLES / 2;
+					if (remus->tail_pos >= samples_needed) {
+						fprintf(stderr, "REMUS: Collected enough samples for crossfade (%u samples)\n", remus->tail_pos);
+						remus->recording_tail = false;
+						remus->has_recorded = true;
+					}
+				}
+				
 				// Check if tail buffer is full without finding a match
-				if (remus->tail_pos >= TAIL_BUFFER_SIZE) {
+				if (remus->tail_pos >= TAIL_BUFFER_SIZE && remus->stitch_position == 0) {
 					// Choose closest position able to crossfade
-					stitch_position = CROSSFADE_SAMPLES / 2;
-					fprintf(stderr, "REMUS: Tail buffer full - copying %u samples (no zero-crossing match)\n", stitch_position);
+					remus->stitch_position = CROSSFADE_SAMPLES / 2;
+					fprintf(stderr, "REMUS: Tail buffer full - will use position %u (no zero-crossing match)\n", remus->stitch_position);
 					
 					remus->recording_tail = false;
 					remus->has_recorded = true;
-					remus->tail_pos = 0;
 					if (remus->tail_min_distance < TAIL_BUFFER_SIZE) {
 						fprintf(stderr, "REMUS: Finishing without zero-crossing alignment. "
 						        "Considered %u zero-crossings, minimal distance found: %d samples\n",
@@ -519,31 +531,41 @@ run(LV2_Handle instance, uint32_t n_samples)
 				}
 			}
 			
-			// Perform crossfade if needed
-			if (stitch_position > 0) {
-				// Apply crossfade centered around stitch_position position
-				const uint32_t half_crossfade = CROSSFADE_SAMPLES / 2;
-				
-				for (uint32_t cf = 0; cf < CROSSFADE_SAMPLES; cf++) {
-					// Position in loop buffer
-					uint32_t loop_pos = (int32_t)stitch_position - (int32_t)half_crossfade + (int32_t)cf;
-					
-					// Position in tail buffer
-					int32_t tail_offset = (int32_t)stitch_position - (int32_t)half_crossfade + (int32_t)cf;
-				
-					// Linear crossfade: fade out loop, fade in tail
-					float fade_in = (float)cf / (float)(CROSSFADE_SAMPLES - 1);
-					float fade_out = 1.0f - fade_in;
-					
-					remus->buffer[loop_pos] = remus->buffer[loop_pos] * fade_out + remus->tail_buffer[tail_offset] * fade_in;
-				}
-				
-				fprintf(stderr, "REMUS: Applied %u-sample crossfade around position %u for click-free transition\n", CROSSFADE_SAMPLES, stitch_position);
-			}
-			
 			// Silence output while recording tail
 			audio_out[i] = 0.0f;
-		} else if (remus->playing && remus->has_recorded && remus->loop_samples > 0) {
+		}
+		
+		// Perform crossfade after tail recording is complete
+		if (!remus->recording_tail && remus->stitch_position > 0 && remus->tail_pos > 0) {
+			const uint32_t half_crossfade = CROSSFADE_SAMPLES / 2;
+			uint32_t crossfade_start = remus->stitch_position - half_crossfade;
+			
+			// Copy samples from tail buffer before the crossfade zone
+			if (crossfade_start > 0) {
+				memcpy(remus->buffer, remus->tail_buffer, crossfade_start * sizeof(float));
+				fprintf(stderr, "REMUS: Copied %u samples before crossfade zone\n", crossfade_start);
+			}
+			
+			// Apply crossfade centered around stitch_position
+			for (uint32_t cf = 0; cf < CROSSFADE_SAMPLES; cf++) {
+				// Position in both buffers
+				uint32_t pos = crossfade_start + cf;
+			
+				// Linear crossfade: fade out loop, fade in tail
+				float fade_in = (float)cf / (float)(CROSSFADE_SAMPLES - 1);
+				float fade_out = 1.0f - fade_in;
+				
+				remus->buffer[pos] = remus->tail_buffer[pos] * fade_out + remus->buffer[pos] * fade_in;
+			}
+			
+			fprintf(stderr, "REMUS: Applied %u-sample crossfade around position %u for click-free transition\n", CROSSFADE_SAMPLES, remus->stitch_position);
+			
+			// Reset for next time
+			remus->tail_pos = 0;
+			remus->stitch_position = 0;
+		}
+		
+		if (remus->playing && remus->has_recorded && remus->loop_samples > 0) {
 			// Playback loop (only when playing)
 			audio_out[i] = remus->buffer[remus->read_pos];
 			
