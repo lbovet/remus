@@ -23,22 +23,21 @@
 			lv2:AudioPort ;
 		lv2:index 0 ;
 		lv2:symbol "audio_in" ;
-		lv2:name "Audio In" ;
+		lv2:name "Audio In"
 	] , [
 		a lv2:OutputPort ,
 			lv2:AudioPort ;
 		lv2:index 1 ;
 		lv2:symbol "audio_out" ;
-		lv2:name "Audio Out" ;
+		lv2:name "Audio Out"
 	] , [
 		a lv2:InputPort ,
 			atom:AtomPort ;
 		atom:bufferType atom:Sequence ;
 		atom:supports time:Position ;
 		lv2:index 2 ;
-		lv2:symbol "control" ;
-		lv2:name "Control" ;
-		lv2:designation lv2:control ;
+		lv2:symbol "time" ;
+		lv2:name "Time"
 	] , [
 		a lv2:InputPort ,
 			lv2:ControlPort ;
@@ -48,7 +47,7 @@
 		lv2:default 0.0 ;
 		lv2:minimum 0.0 ;
 		lv2:maximum 1.0 ;
-		lv2:portProperty lv2:toggled ;
+		lv2:portProperty lv2:toggled
 	] , [
 		a lv2:InputPort ,
 			lv2:ControlPort ;
@@ -74,7 +73,7 @@
 		] , [
 			rdfs:label "16 bars" ;
 			rdf:value 16.0
-		];
+		]
 	] , [
 		a lv2:InputPort ,
 			lv2:ControlPort ;
@@ -84,7 +83,7 @@
 		lv2:default 1.0 ;
 		lv2:minimum 0.0 ;
 		lv2:maximum 1.0 ;
-		lv2:portProperty lv2:toggled ;
+		lv2:portProperty lv2:toggled
 	] , [
 		a lv2:OutputPort ,
 			lv2:ControlPort ;
@@ -93,7 +92,7 @@
 		lv2:name "Armed" ;
 		lv2:minimum 0.0 ;
 		lv2:maximum 1.0 ;
-		lv2:portProperty lv2:toggled ;
+		lv2:portProperty lv2:toggled
 	] , [
 		a lv2:OutputPort ,
 			lv2:ControlPort ;
@@ -102,7 +101,7 @@
 		lv2:name "Recording" ;
 		lv2:minimum 0.0 ;
 		lv2:maximum 1.0 ;
-		lv2:portProperty lv2:toggled ;
+		lv2:portProperty lv2:toggled
 	] , [
 		a lv2:OutputPort ,
 			lv2:ControlPort ;
@@ -111,5 +110,5 @@
 		lv2:name "Recorded" ;
 		lv2:minimum 0.0 ;
 		lv2:maximum 1.0 ;
-		lv2:portProperty lv2:toggled ;
+		lv2:portProperty lv2:toggled
 	] .

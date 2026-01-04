@@ -21,7 +21,7 @@
 typedef enum {
 	REMUS_AUDIO_IN      = 0,
 	REMUS_AUDIO_OUT     = 1,
-	REMUS_CONTROL       = 2,
+	REMUS_TIME          = 2,
 	REMUS_RECORD_EN     = 3,
 	REMUS_LOOP_LEN      = 4,
 	REMUS_PERSIST_EN    = 5,
@@ -34,7 +34,7 @@ typedef struct {
 	// Port buffers
 	const float*      audio_in;
 	float*            audio_out;
-	const LV2_Atom_Sequence* control_port;
+	const LV2_Atom_Sequence* time;
 	const float*      record_enable;
 	const float*      loop_length;
 	const float*      persist_enable;
@@ -86,12 +86,14 @@ typedef struct {
 	uint32_t stitch_position;  // Position for crossfade, 0 means not set
 	
 	double   sample_rate;
-	float    last_bar_beat;
-	int64_t  last_bar;
-	
+ 	int64_t transport_frame;      /* Current frame position from host */
+    int64_t bar_start_frame;      /* Frame position of the most recent bar start */
+	bool transport_rolling;
+    bool transport_just_stopped;
+ 	
 	// Transport tempo/time signature
-	float    transport_bpm;
-	float    transport_beats_per_bar;
+	float    bpm;
+	float    beats_per_bar;
 	
 	// Debug flag
 	bool     debug_logged;
@@ -160,11 +162,13 @@ instantiate(const LV2_Descriptor*     descriptor,
 	remus->recording_tail = false;
 	remus->tail_zero_crossings = 0;
 	remus->tail_min_distance = TAIL_BUFFER_SIZE;
-remus->stitch_position = 0;
-	remus->last_bar_beat = -1.0f;
-	remus->last_bar = -1;
-	remus->transport_bpm = 120.0f;
-	remus->transport_beats_per_bar = 4.0f;
+	remus->stitch_position = 0;
+    remus->transport_frame = 0;
+    remus->bar_start_frame = 0;
+	remus->transport_rolling = false;
+    remus->transport_just_stopped = false;
+	remus->bpm = 120.0f;
+	remus->beats_per_bar = 4.0f;
 	remus->debug_logged = false;
 	
 	return (LV2_Handle)remus;
@@ -184,8 +188,8 @@ connect_port(LV2_Handle instance,
 	case REMUS_AUDIO_OUT:
 		remus->audio_out = (float*)data;
 		break;
-	case REMUS_CONTROL:
-		remus->control_port = (const LV2_Atom_Sequence*)data;
+	case REMUS_TIME:
+		remus->time = (const LV2_Atom_Sequence*)data;
 		break;
 	case REMUS_RECORD_EN:
 		remus->record_enable = (const float*)data;
@@ -233,11 +237,106 @@ activate(LV2_Handle instance)
 	remus->recording_tail = false;
 	remus->tail_zero_crossings = 0;
 	remus->tail_min_distance = TAIL_BUFFER_SIZE;
-remus->stitch_position = 0;
-	remus->last_bar_beat = -1.0f;
-	remus->last_bar = -1;
-	remus->transport_bpm = 120.0f;
-	remus->transport_beats_per_bar = 4.0f;
+	remus->stitch_position = 0;
+    remus->transport_frame = 0;
+    remus->bar_start_frame = 0;
+	remus->transport_rolling = false;
+    remus->transport_just_stopped = false;
+	remus->bpm = 120.0f;
+	remus->beats_per_bar = 4.0f;
+}
+
+/* Calculate frames per beat */
+static inline double
+frames_per_beat(Remus* self)
+{
+    return (self->sample_rate * 60.0) / self->bpm;
+}
+
+/* Update transport information from position */
+static void
+update_transport(Remus* self, const LV2_Atom_Object* obj, int64_t frame_offset)
+{
+    LV2_Atom* bar = NULL;
+    LV2_Atom* barBeat = NULL;
+    LV2_Atom* bpm_atom = NULL;
+    LV2_Atom* bpb = NULL;
+    LV2_Atom* speed = NULL;
+    LV2_Atom* frame_atom = NULL;
+    
+    /* Get frame position */
+    LV2_URID frame_urid = self->map->map(self->map->handle, LV2_TIME__frame);
+    
+    lv2_atom_object_get(obj,
+                       frame_urid, &frame_atom,
+                       self->time_bar, &bar,
+                       self->time_barBeat, &barBeat,
+                       self->time_beatsPerMinute, &bpm_atom,
+                       self->time_beatsPerBar, &bpb,
+                       self->time_speed, &speed,
+                       NULL);
+    
+    /* Update frame position */
+    if (frame_atom && frame_atom->type == self->atom_Long) {
+        self->transport_frame = ((LV2_Atom_Long*)frame_atom)->body + frame_offset;
+    }
+    
+    /* If we get bar/barBeat, calculate the frame position of the bar start */
+    if (bar && bar->type == self->atom_Long &&
+        barBeat && barBeat->type == self->atom_Float) {
+        
+        double beat_in_bar = (double)((LV2_Atom_Float*)barBeat)->body;
+        double frames_per_beat_val = frames_per_beat(self);
+        int64_t frames_from_bar_start = (int64_t)(beat_in_bar * frames_per_beat_val);
+        self->bar_start_frame = self->transport_frame - frames_from_bar_start;
+    }
+    
+    if (bpm_atom && bpm_atom->type == self->atom_Float) {
+        self->bpm = (double)((LV2_Atom_Float*)bpm_atom)->body;
+    }
+    
+    if (bpb && bpb->type == self->atom_Float) {
+        self->beats_per_bar = (double)((LV2_Atom_Float*)bpb)->body;
+    }
+    
+    if (speed && speed->type == self->atom_Float) {
+        float speed_val = ((LV2_Atom_Float*)speed)->body;
+        bool was_rolling = self->transport_rolling;
+        self->transport_rolling = (speed_val > 0.0f);
+        
+        /* Detect transport stop */
+        if (was_rolling && !self->transport_rolling) {
+            self->transport_just_stopped = true;
+            /* If we were playing, go back to IDLE */
+            if (self->playing) {
+                fprintf(stderr, "Romulus: Transport stopped, PLAYING -> IDLE\n");
+                self->playing = false;
+            }
+        }
+        
+        /* Detect transport start - schedule playing */
+        if (!was_rolling && self->transport_rolling) {
+            fprintf(stderr, "Romulus: Transport started -> IDLE\n");
+            self->playing = false;
+        }
+    }
+    
+}
+
+/* Check if we're at the start of a bar based on frame position */
+static bool
+is_bar_start(Remus* self, int64_t current_frame)
+{
+    /* Calculate frames per bar */
+    double frames_per_beat_val = frames_per_beat(self);
+    int64_t frames_per_bar = (int64_t)(frames_per_beat_val * self->beats_per_bar);
+    
+    /* Calculate position within the current bar */
+    int64_t frames_since_bar_start = current_frame - self->bar_start_frame;
+    int64_t position_in_bar = frames_since_bar_start % frames_per_bar;
+    
+    /* We're at bar start if position is within first 256 frames (about 5ms at 48kHz) */
+    return position_in_bar < 256;
 }
 
 static void
@@ -257,49 +356,19 @@ run(LV2_Handle instance, uint32_t n_samples)
 	const float        rec_enable = *remus->record_enable;
 	const float        loop_len   = *remus->loop_length;
 	
-	// Process time position events
-	float current_bar_beat = remus->last_bar_beat;
-	int64_t current_bar = remus->last_bar;
-	bool transport_rolling = false;
-	
-	LV2_ATOM_SEQUENCE_FOREACH(remus->control_port, ev) {
+	LV2_ATOM_SEQUENCE_FOREACH(remus->time, ev) {
 		if (ev->body.type == remus->atom_Blank || ev->body.type == remus->atom_Object) {
 			const LV2_Atom_Object* obj = (const LV2_Atom_Object*)&ev->body;
 			if (obj->body.otype == remus->time_Position) {
-				// Extract transport position, tempo, and time signature
-				LV2_Atom *bar_beat = NULL, *bar = NULL, *speed = NULL;
-				LV2_Atom *bpm_atom = NULL, *beats_per_bar_atom = NULL;
-				lv2_atom_object_get(obj,
-				                    remus->time_barBeat, &bar_beat,
-				                    remus->time_bar, &bar,
-				                    remus->time_speed, &speed,
-				                    remus->time_beatsPerMinute, &bpm_atom,
-				                    remus->time_beatsPerBar, &beats_per_bar_atom,
-				                    NULL);
-				
-				if (bar_beat && bar_beat->type == remus->atom_Float) {
-					current_bar_beat = ((const LV2_Atom_Float*)bar_beat)->body;
-				}
-				if (bar && bar->type == remus->atom_Long) {
-					current_bar = ((const LV2_Atom_Long*)bar)->body;
-				}
-				if (speed && speed->type == remus->atom_Float) {
-					transport_rolling = (((const LV2_Atom_Float*)speed)->body > 0.0f);
-				}
-				if (bpm_atom && bpm_atom->type == remus->atom_Float) {
-					remus->transport_bpm = ((const LV2_Atom_Float*)bpm_atom)->body;
-				}
-				if (beats_per_bar_atom && beats_per_bar_atom->type == remus->atom_Float) {
-					remus->transport_beats_per_bar = ((const LV2_Atom_Float*)beats_per_bar_atom)->body;
-				}
+				update_transport(remus, (const LV2_Atom_Object*)&ev->body, ev->time.frames);
 			}
 		}
 	}
 	
 	// Calculate loop length in samples using transport tempo
 	// beats_per_bar * bars * 60 / bpm * sample_rate
-	const uint32_t loop_beats = (uint32_t)(remus->transport_beats_per_bar * loop_len);
-	const uint32_t new_loop_samples = (uint32_t)((loop_beats * 60.0 * remus->sample_rate) / remus->transport_bpm);
+	const uint32_t loop_beats = (uint32_t)(remus->beats_per_bar * loop_len);
+	const uint32_t new_loop_samples = (uint32_t)((loop_beats * 60.0 * remus->sample_rate) / remus->bpm);
 	
 	// Detect record enable edge (on to off transition)
 	const bool rec_start = (rec_enable <= 0.5f) && (remus->prev_record_enable > 0.5f);
@@ -331,37 +400,25 @@ run(LV2_Handle instance, uint32_t n_samples)
 	}
 
 	// Check if we've crossed a bar boundary
-	if (remus->waiting_for_bar && transport_rolling) {
-		// Detect bar change
-		if (current_bar >= 0 && remus->last_bar >= 0 && current_bar != remus->last_bar) {
-			// New bar started - begin recording
-			remus->recording = true;
-			remus->waiting_for_bar = false;
-			remus->write_pos = 0;
-			remus->read_pos = 0;
-			remus->has_recorded = false;
-		}
-		// Also check if barBeat wrapped around to detect bar boundary
-		else if (current_bar_beat >= 0.0f && remus->last_bar_beat >= 0.0f &&
-		         current_bar_beat < remus->last_bar_beat) {
-			remus->recording = true;
-			remus->waiting_for_bar = false;
-			remus->write_pos = 0;
-			remus->read_pos = 0;
-			remus->has_recorded = false;
-		}
+	if (remus->waiting_for_bar && is_bar_start(remus, remus->transport_frame)) {
+		// New bar started - begin recording
+		remus->recording = true;
+		remus->waiting_for_bar = false;
+		remus->write_pos = 0;
+		remus->read_pos = 0;
+		remus->has_recorded = false;
 	}
 	
 	// Handle playback alignment with transport
 	if (remus->has_recorded && remus->loop_samples > 0 && !remus->recording) {
-		if (!transport_rolling) {
+		if (!remus->transport_rolling) {
 			// Transport stopped - stop playing
 			remus->playing = false;
 			remus->waiting_to_play = false;
 		} else if (!remus->playing && !remus->waiting_to_play) {
 			// Transport started and we're not playing
 			// If we're at the very beginning (bar 0, beat 0), start immediately
-			if (current_bar == 0 && current_bar_beat >= 0.0f && current_bar_beat < 0.1f) {
+			if (is_bar_start(remus, remus->transport_frame)) {
 				remus->playing = true;
 				remus->waiting_to_play = false;
 				remus->read_pos = 0;
@@ -371,14 +428,8 @@ run(LV2_Handle instance, uint32_t n_samples)
 			}
 		} else if (remus->waiting_to_play) {
 			// Check if we've crossed a bar boundary
-			if (current_bar >= 0 && remus->last_bar >= 0 && current_bar != remus->last_bar) {
+			if (is_bar_start(remus, remus->transport_frame)) {
 				// New bar started - begin playing
-				remus->playing = true;
-				remus->waiting_to_play = false;
-				remus->read_pos = 0;
-			} else if (current_bar_beat >= 0.0f && remus->last_bar_beat >= 0.0f &&
-			           current_bar_beat < remus->last_bar_beat) {
-				// Bar wrapped - begin playing
 				remus->playing = true;
 				remus->waiting_to_play = false;
 				remus->read_pos = 0;
@@ -560,7 +611,7 @@ remus->stitch_position = 0;
 			remus->stitch_position = 0;
 		}
 		
-		if (remus->playing && remus->has_recorded && remus->loop_samples > 0) {
+		if (remus->playing && remus->has_recorded && remus->loop_samples > 0 && !remus->waiting_for_bar) {
 			// Playback loop (only when playing)
 			audio_out[i] = remus->buffer[remus->read_pos];
 			
@@ -585,9 +636,8 @@ remus->stitch_position = 0;
 		*remus->recorded_status = remus->has_recorded ? 1.0f : 0.0f;
 	}
 	
-	// Save current position for next cycle
-	remus->last_bar_beat = current_bar_beat;
-	remus->last_bar = current_bar;
+    /* Update frame position for next cycle */
+    remus->transport_frame += n_samples;
 }
 
 static void
